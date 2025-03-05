@@ -1,9 +1,11 @@
-SpeechRecognition==3.10.1
-openai-whisper==20231117
-requests==2.31.0
+flask==3.0.2
+loguru==0.7.2
 beautifulsoup4==4.12.3
+requests==2.31.0
+python-dotenv==1.0.1
+SpeechRecognition==3.10.1
+pyaudio==0.2.14
+openai-whisper==20231117
 pyttsx3==2.90
 PyAudio==0.2.14
-python-dotenv==1.0.1
-keyboard==0.13.5
-loguru==0.7.2 
+keyboard==0.13.5 

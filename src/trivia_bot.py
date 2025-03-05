@@ -14,120 +14,128 @@ from services.tts_service import TTSService
 
 class TriviaBot:
     def __init__(self):
-        """Initialize the Trivia Bot with all required services."""
-        # Load configuration
-        self.speech_engine = os.getenv('SPEECH_RECOGNITION_ENGINE', 'google').lower()
-        
-        # Initialize services
-        self.speech_service = SpeechRecognitionService(self.speech_engine)
-        self.search_service = SearchService()
-        self.tts_service = TTSService()
-        
-        # Set up thread pool for concurrent operations
-        self.executor = ThreadPoolExecutor(max_workers=3)
-        
-        # Initialize state
-        self.is_listening = False
-        self.last_question = None
-        self.last_answer = None
-        self.running = True
-        
-        logger.info("Trivia Bot initialized successfully")
-    
-    def start(self):
-        """Start the Trivia Bot and listen for hotkey."""
+        """Initialize the Trivia Bot with its services."""
         try:
-            # Set up signal handler for clean exit
+            self.search_service = SearchService()
+            self.speech_service = SpeechRecognitionService()
+            self.tts_service = TTSService()
+            self.is_listening = False
+            self.listen_thread = None
+            logger.info("Trivia Bot initialized successfully")
+        except Exception as e:
+            logger.error(f"Error initializing Trivia Bot: {e}")
+            raise
+
+    def start(self):
+        """Start the bot in CLI mode."""
+        try:
+            # Set up signal handler for graceful shutdown
             signal.signal(signal.SIGINT, self.signal_handler)
             
             logger.info("Starting Trivia Bot...")
             logger.info("Press Enter to start/stop listening")
             logger.info("Press Ctrl+C to exit")
             
-            # Start input thread
-            input_thread = threading.Thread(target=self.input_loop)
-            input_thread.daemon = True
-            input_thread.start()
-            
-            # Main loop
-            while self.running:
-                time.sleep(0.1)  # Reduce CPU usage
+            while True:
+                input()  # Wait for Enter key
+                self.toggle_listening()
                 
         except Exception as e:
             logger.error(f"Error in main loop: {e}")
-        finally:
             self.cleanup()
-    
-    def input_loop(self):
-        """Handle user input in a separate thread."""
-        while self.running:
-            try:
-                input()  # Wait for Enter key
-                self.toggle_listening()
-            except EOFError:
-                continue
-    
-    def signal_handler(self, signum, frame):
-        """Handle Ctrl+C signal."""
-        logger.info("Shutting down...")
-        self.running = False
-    
+            sys.exit(1)
+
+    def get_answer(self, question: str) -> str:
+        """Get answer for a question (web interface mode)."""
+        try:
+            logger.info(f"Processing question: {question}")
+            answer = self.search_service.search_for_answer(question)
+            
+            if answer:
+                # Speak the answer if TTS is available
+                try:
+                    self.tts_service.speak(answer)
+                except Exception as e:
+                    logger.warning(f"TTS failed: {e}")
+                return answer
+            else:
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error getting answer: {e}")
+            return None
+
     def toggle_listening(self):
         """Toggle the listening state."""
-        self.is_listening = not self.is_listening
-        if self.is_listening:
-            logger.info("Listening activated")
-            self.listen_and_answer()
+        if not self.is_listening:
+            self.start_listening()
         else:
+            self.stop_listening()
+
+    def start_listening(self):
+        """Start listening for questions."""
+        if not self.is_listening:
+            self.is_listening = True
+            logger.info("Listening activated")
+            self.listen_thread = threading.Thread(target=self.listen_loop)
+            self.listen_thread.daemon = True
+            self.listen_thread.start()
+
+    def stop_listening(self):
+        """Stop listening for questions."""
+        if self.is_listening:
+            self.is_listening = False
             logger.info("Listening deactivated")
-    
+            if self.listen_thread:
+                self.listen_thread.join(timeout=1)
+
+    def listen_loop(self):
+        """Main listening loop."""
+        while self.is_listening:
+            try:
+                self.listen_and_answer()
+            except Exception as e:
+                logger.error(f"Error in listening loop: {e}")
+                self.is_listening = False
+                break
+
     def listen_and_answer(self):
-        """Listen for a question and find its answer."""
+        """Listen for a question and provide an answer."""
         try:
-            # Start timing
-            start_time = time.time()
-            
             # Listen for question
             question = self.speech_service.listen_for_question()
             if not question:
-                logger.warning("No question detected")
                 return
-            
-            self.last_question = question
+                
             logger.info(f"Question detected: {question}")
             
-            # Search for answer in parallel with TTS confirmation
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                # Start the search
-                search_future = executor.submit(self.search_service.search_for_answer, question)
+            # Search for answer
+            answer = self.search_service.search_for_answer(question)
+            
+            # Provide answer
+            if answer:
+                self.tts_service.speak(answer)
+            else:
+                self.tts_service.speak("I'm sorry, I couldn't find an answer to that question.")
                 
-                # Confirm question was heard
-                self.tts_service.speak("Searching for answer to: " + question)
-                
-                # Wait for search to complete
-                answer = search_future.result(timeout=8)  # Ensure we stay within 10-second limit
-            
-            if not answer:
-                self.tts_service.speak("Sorry, I couldn't find an answer to that question.")
-                return
-            
-            # Store and speak the answer
-            self.last_answer = answer
-            self.tts_service.speak(answer)
-            
-            # Log timing
-            elapsed_time = time.time() - start_time
-            logger.info(f"Total response time: {elapsed_time:.2f} seconds")
-            
         except Exception as e:
-            logger.error(f"Error in listen_and_answer: {e}")
+            logger.error(f"Error in listen and answer: {e}")
             self.tts_service.speak("Sorry, there was an error processing your question.")
-    
+
+    def signal_handler(self, signum, frame):
+        """Handle shutdown signals."""
+        logger.info("Shutting down...")
+        self.cleanup()
+        sys.exit(0)
+
     def cleanup(self):
         """Clean up resources."""
         try:
-            self.running = False
-            self.executor.shutdown(wait=False)
+            self.stop_listening()
             logger.info("Cleanup completed")
         except Exception as e:
-            logger.error(f"Error during cleanup: {e}") 
+            logger.error(f"Error during cleanup: {e}")
+
+if __name__ == "__main__":
+    bot = TriviaBot()
+    bot.start() 
