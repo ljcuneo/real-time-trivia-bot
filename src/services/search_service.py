@@ -25,15 +25,15 @@ class SearchService:
     def search_for_answer(self, question: str) -> Optional[str]:
         """Search for an answer to the given question."""
         try:
-            # Try SERP API first if available
-            if self.api_key:
-                answer = self._serp_api_search(question)
+            # Handle basic math questions first
+            if self._is_math_question(question):
+                answer = self._calculate_math(question)
                 if answer:
                     return answer
             
-            # Handle basic math questions directly
-            if self._is_math_question(question):
-                answer = self._calculate_math(question)
+            # Try SERP API if available
+            if self.api_key:
+                answer = self._serp_api_search(question)
                 if answer:
                     return answer
             
@@ -56,116 +56,221 @@ class SearchService:
             return None
 
     def _serp_api_search(self, question: str) -> Optional[str]:
-        """Search using SERP API."""
+        """Search using Search API."""
         try:
             search_query = self._prepare_search_query(question)
-            logger.info(f"Searching with SERP API: {search_query}")
+            logger.info(f"Searching with Search API: {search_query}")
             
-            params = {
-                'api_key': self.api_key,
-                'q': search_query,
-                'gl': 'us',
-                'hl': 'en',
-                'google_domain': 'google.com',
-                'output': 'json'
+            url = 'https://www.searchapi.io/api/v1/search'
+            headers = {
+                'Accept': 'application/json',
+                'Authorization': f'Bearer {self.api_key}'
             }
             
-            # Use the correct endpoint with increased timeout
+            params = {
+                'q': search_query,
+                'engine': 'google',
+                'google_domain': 'google.com',
+                'gl': 'us',
+                'hl': 'en',
+                'num': '3'  # Get top 3 results for better context
+            }
+            
             response = requests.get(
-                'https://serpapi.com/search.json',
+                url,
+                headers=headers,
                 params=params,
-                timeout=15
+                timeout=30
             )
             
-            # Log the response for debugging
-            logger.debug(f"SERP API Response Status: {response.status_code}")
-            
             if response.status_code != 200:
-                logger.error(f"SERP API error: {response.status_code} - {response.text}")
+                logger.error(f"Search API error: {response.status_code}")
                 return None
+
+            data = response.json()
+            search_texts = []
             
-            try:
-                data = response.json()
-            except json.JSONDecodeError as e:
-                logger.error(f"Failed to parse SERP API response: {e}")
-                logger.debug(f"Response text: {response.text[:500]}")
-                return None
-            
-            # Log the response structure
-            logger.debug(f"SERP API response keys: {list(data.keys())}")
-            
-            # Try to extract answer from different SERP features
+            # Extract answer from answer box if available
             if 'answer_box' in data:
-                logger.debug("Found answer box in response")
                 answer_box = data['answer_box']
                 if isinstance(answer_box, dict):
-                    # Try different fields in order of preference
                     for field in ['answer', 'snippet', 'title', 'result']:
                         if field in answer_box and answer_box[field]:
-                            answer = answer_box[field]
-                            logger.info(f"Found answer in answer_box.{field}")
-                            return self._clean_answer(answer)
-            
+                            return self._clean_answer(answer_box[field])
+
+            # Try knowledge graph next
             if 'knowledge_graph' in data:
-                logger.debug("Found knowledge graph in response")
                 kg = data['knowledge_graph']
                 if isinstance(kg, dict):
-                    # Try different fields in order of preference
                     for field in ['description', 'answer', 'snippet', 'title']:
                         if field in kg and kg[field]:
-                            answer = kg[field]
-                            logger.info(f"Found answer in knowledge_graph.{field}")
-                            return self._clean_answer(answer)
-            
-            if 'organic_results' in data and len(data['organic_results']) > 0:
-                logger.debug("Found organic results in response")
-                first_result = data['organic_results'][0]
-                if isinstance(first_result, dict):
-                    # Try different fields in order of preference
-                    for field in ['snippet', 'title', 'link_text']:
-                        if field in first_result and first_result[field]:
-                            answer = first_result[field]
-                            logger.info(f"Found answer in organic_results[0].{field}")
-                            return self._clean_answer(answer)
-            
-            logger.warning("No suitable answer found in SERP API response")
+                            return self._clean_answer(kg[field])
+
+            # Finally check organic results
+            if 'organic_results' in data and data['organic_results']:
+                for result in data['organic_results'][:3]:
+                    for field in ['snippet', 'title']:
+                        if field in result and result[field]:
+                            cleaned = self._clean_answer(result[field])
+                            if cleaned:
+                                return cleaned
+
             return None
             
-        except requests.Timeout:
-            logger.error("SERP API request timed out, will try fallback methods")
-            return None
-        except requests.RequestException as e:
-            logger.error(f"SERP API request failed: {e}")
-            return None
         except Exception as e:
-            logger.error(f"Error during SERP API search: {e}")
+            logger.error(f"Error during search: {e}")
             return None
+
+    def _prepare_search_query(self, question: str) -> str:
+        """Prepare the search query to improve results."""
+        # Remove question marks and clean up
+        question = question.strip('?').strip().lower()
+        
+        # Special handling for math questions
+        if re.search(r'\d[\s+\-*/]\d', question):
+            return f"calculator {question}"
+
+        # For questions asking about "most", "biggest", etc.
+        superlative_pattern = r'\b(?:largest|biggest|highest|most|best)\b'
+        if re.search(superlative_pattern, question):
+            return f"{question} facts confirmed"
+
+        # For questions starting with common question words
+        if question.startswith(('what', 'when', 'who', 'where', 'which', 'how')):
+            return f"{question} facts direct answer"
+        
+        return question
+
+    def _clean_answer(self, text: str) -> str:
+        """Clean up the answer text."""
+        if not text:
+            return None
+            
+        # Remove extra whitespace
+        text = re.sub(r'\s+', ' ', text)
+        
+        # Remove common prefixes
+        prefixes = [
+            'Search Results',
+            'Featured snippet from the web',
+            'Web results',
+            'People also ask',
+            'Description',
+            'Overview',
+            'Quick Answer',
+            'Top answer:',
+            'Advertisement',
+            'According to',
+            'Below, we\'ve compiled',
+            'Here are',
+            'In this article'
+        ]
+        for prefix in prefixes:
+            if text.lower().startswith(prefix.lower()):
+                text = text[len(prefix):].strip()
+        
+        # Remove citations and URLs
+        text = re.sub(r'\[\d+\]', '', text)
+        text = re.sub(r'http\S+', '', text)
+
+        # Split into sentences
+        sentences = [s.strip() for s in re.split(r'[.!?]+', text) if s.strip()]
+        if not sentences:
+            return text.strip()
+
+        # Score each sentence based on information density and relevance
+        scored_sentences = []
+        for sentence in sentences:
+            score = 0
+            lower_sentence = sentence.lower()
+            
+            # Filter out non-answers and meta-text
+            if any(word in lower_sentence for word in ['click here', 'read more', 'learn more', 'find out', 'subscribe']):
+                continue
+            
+            # Prefer sentences with specific facts
+            if re.search(r'\d', sentence):  # Contains numbers
+                score += 3
+            if re.search(r'\b(?:19|20)\d{2}\b', sentence):  # Contains years
+                score += 2
+            if re.search(r'\$\s*\d+(?:\.\d+)?', sentence):  # Contains monetary values
+                score += 2
+            
+            # Prefer sentences that directly answer questions
+            if re.search(r'\b(?:is|are|was|were|has|have|had)\b', lower_sentence):
+                score += 2
+            
+            # Prefer sentences with key information indicators
+            if re.search(r'\b(?:because|therefore|thus|hence|since|due to)\b', lower_sentence):
+                score += 2
+            
+            # Prefer sentences with proper nouns
+            if re.search(r'[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*', sentence):
+                score += 1
+            
+            # Prefer sentences of reasonable length
+            words = sentence.split()
+            if 6 <= len(words) <= 20:  # Ideal length range
+                score += 2
+            elif len(words) < 6:  # Too short
+                score -= 1
+            else:  # Too long
+                score -= len(words) // 20
+            
+            scored_sentences.append((score, sentence))
+        
+        # Sort by score and length (preferring higher scores and shorter sentences)
+        scored_sentences.sort(key=lambda x: (-x[0], len(x[1])))
+        
+        # Return the highest scoring sentence
+        if scored_sentences:
+            return scored_sentences[0][1].strip()
+        
+        # Fallback to first sentence
+        return sentences[0].strip()
 
     def _is_math_question(self, question: str) -> bool:
         """Check if the question is a basic math question."""
-        # Remove 'what is' and other common prefixes
-        clean_q = question.lower().replace('what is', '').replace('calculate', '').strip()
-        # Look for basic math operators
-        return bool(re.search(r'\d[\s+\-*/]\d', clean_q))
+        # Remove 'what is' and other common prefixes and clean whitespace
+        clean_q = question.lower()
+        clean_q = re.sub(r'^(?:what\s+is|calculate|solve|find|tell\s+me)\s*', '', clean_q)
+        clean_q = clean_q.strip('?').strip()
+        
+        # Convert word operators to symbols
+        clean_q = clean_q.replace('plus', '+').replace('minus', '-')
+        clean_q = clean_q.replace('times', '*').replace('divided by', '/')
+        
+        # Look for math expression patterns
+        return bool(re.match(r'^\s*\d+\s*[\+\-\*/]\s*\d+\s*$', clean_q))
 
     def _calculate_math(self, question: str) -> Optional[str]:
         """Calculate basic math expressions."""
         try:
-            # Extract the math expression
-            clean_q = question.lower().replace('what is', '').replace('calculate', '').strip()
-            # Convert common words to operators
+            # Clean and normalize the question
+            clean_q = question.lower()
+            clean_q = re.sub(r'^(?:what\s+is|calculate|solve|find|tell\s+me)\s*', '', clean_q)
+            clean_q = clean_q.strip('?').strip()
+            
+            # Convert word operators to symbols
             clean_q = clean_q.replace('plus', '+').replace('minus', '-')
             clean_q = clean_q.replace('times', '*').replace('divided by', '/')
             
-            # Extract numbers and operator
-            match = re.search(r'(\d+)\s*([\+\-\*/])\s*(\d+)', clean_q)
+            # Remove all whitespace
+            clean_q = re.sub(r'\s+', '', clean_q)
+            
+            # Match the exact math expression
+            if not re.match(r'^\d+[\+\-\*/]\d+$', clean_q):
+                return None
+            
+            # Parse numbers and operator
+            match = re.match(r'^(\d+)([\+\-\*/])(\d+)$', clean_q)
             if not match:
                 return None
-                
-            num1, op, num2 = match.groups()
-            num1, num2 = float(num1), float(num2)
             
-            result = None
+            num1, op, num2 = match.groups()
+            num1, num2 = int(num1), int(num2)
+            
+            # Perform calculation
             if op == '+':
                 result = num1 + num2
             elif op == '-':
@@ -174,13 +279,13 @@ class SearchService:
                 result = num1 * num2
             elif op == '/' and num2 != 0:
                 result = num1 / num2
+            else:
+                return None
             
-            if result is not None:
-                # Format result to remove trailing zeros
-                formatted = f"{result:.6f}".rstrip('0').rstrip('.')
-                return f"The answer is {formatted}"
-            
-            return None
+            # Format result (remove trailing zeros for decimals)
+            if isinstance(result, float):
+                return f"{result:.6f}".rstrip('0').rstrip('.')
+            return str(result)
             
         except Exception as e:
             logger.error(f"Error during math calculation: {e}")
@@ -277,69 +382,4 @@ class SearchService:
             
         except Exception as e:
             logger.error(f"Error during DuckDuckGo search: {e}")
-            return None
-
-    def _prepare_search_query(self, question: str) -> str:
-        """Prepare the search query to improve results."""
-        # Remove question marks and clean up
-        question = question.strip('?').strip().lower()
-        
-        # Special handling for math questions
-        if re.search(r'\d[\s+\-*/]\d', question):
-            return f"calculator {question}"
-        
-        # Special handling for capital questions
-        if 'capital' in question:
-            state_match = re.search(r'capital of ([a-z ]+)', question)
-            if state_match:
-                state = state_match.group(1).strip()
-                return f"{state} capital city"
-        
-        # For other questions, keep it simple
-        return question
-
-    def _clean_answer(self, text: str) -> str:
-        """Clean up the answer text."""
-        if not text:
-            return None
-            
-        # Remove extra whitespace
-        text = re.sub(r'\s+', ' ', text)
-        
-        # Remove common prefixes
-        prefixes = [
-            'Search Results',
-            'Featured snippet from the web',
-            'Web results',
-            'People also ask',
-            'Description',
-            'Overview',
-            'Quick Answer',
-            'Top answer:',
-            'Advertisement'
-        ]
-        for prefix in prefixes:
-            if text.lower().startswith(prefix.lower()):
-                text = text[len(prefix):].strip()
-        
-        # Remove citations [1], [2], etc.
-        text = re.sub(r'\[\d+\]', '', text)
-        
-        # Remove URLs
-        text = re.sub(r'http\S+', '', text)
-        
-        # Clean up whitespace and punctuation
-        text = text.strip('., ')
-        
-        # If text is too short or looks like garbage, return None
-        if len(text) < 2 or not re.search(r'[a-zA-Z]', text):
-            return None
-        
-        # Limit length but try to end at a sentence boundary
-        if len(text) > 500:
-            text = text[:500]
-            last_period = text.rfind('.')
-            if last_period > 400:
-                text = text[:last_period + 1]
-        
-        return text.strip() 
+            return None 

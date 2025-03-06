@@ -3,6 +3,18 @@ from trivia_bot import TriviaBot
 from loguru import logger
 import threading
 import queue
+from dotenv import load_dotenv
+import os
+
+# Load environment variables
+load_dotenv()
+
+# Verify API key is loaded
+api_key = os.getenv('SERP_API_KEY')
+if api_key:
+    logger.info(f"SERP API key loaded: {api_key[:4]}...{api_key[-4:]}")
+else:
+    logger.warning("SERP API key not found in environment")
 
 app = Flask(__name__)
 bot = TriviaBot()
@@ -90,4 +102,4 @@ def get_status():
     })
 
 if __name__ == '__main__':
-    app.run(debug=True, port=5000) 
+    app.run(debug=True, host='0.0.0.0', port=3000) 
